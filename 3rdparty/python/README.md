@@ -1,5 +1,7 @@
 # Why?
 
+This is mostly from a conversation on Slack: https://pantsbuild.slack.com/archives/CASMF8SJ1/p1568861761000600
+
 This was made to handle transitive 3rdparty dependencies. I want a consistent Python build and I want my dependencies to be pinned.
 
 A somewhat frequent problem in our builds was that package A depends on the package `regex` that we don't use directly. Depending on which machine and cache pants is running it would download an existing or a newer version of `regex` because `A` didn't specify a pinned version.
