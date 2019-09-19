@@ -18,7 +18,7 @@ This has also been a problem with Numpy for ML models. The person who trained th
 
 # Why things are done the way they are
 there is some weirdness here:
-1. The Pipfile.lock you use doesn’t contain a listing of which dependencies goes where
+1. The Pipfile.lock you use doesn’t contain a listing of which dependencies are used by other packages, so you can't walk the tree to see which packages depend on `regex`
 2. The command pipenv graph will output a graph of everything, but it’s also not perfect because it doesn’t use the registered name of the package and it has no actual relationship with your lock file. It simply graphs whatever python packages you have installed (which is why I run the generation in a container and from scratch each time, despite it being slow)
 2a. Not using the registered name: .post1 etc. names aren’t kept in the output from pipenv graph so I had some issues where I couldn’t map the actual version to what was output. I solved it by pinning to an older version of the package instead of trying to fix the actual problem (edited) 
 3. Pipenv will not strictly pin your dependencies no matter what you tell it. I use the command to keep my versions and it’ll still upgrade things. Overall, I am happy with this as I would rather keep upgrading as I go along. But this will lead to most likely more targets getting updated than you hoped. Or manually pinning some versions. setuptools is a serial offender here
