@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+import json
+import textwrap
+from argparse import ArgumentParser
+from itertools import chain
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Optional
+
+import toml
+from attr import Factory, attrib, attrs
+
+
+@attrs(slots=True, frozen=True)
+class Dependency:
+    key: str = attrib()
+    package_name: str = attrib()
+    installed_version: str = attrib()
+
+    dependencies: List["Dependency"] = attrib(default=Factory(list))
+
+    def __iter__(self) -> Iterable["Dependency"]:
+        yield self
+        yield from self.dependencies
+
+
+def apply(data: Iterable[Any], functions: Iterable[Callable[[Any], Any]]) -> Iterable[Any]:
+    for f in functions:
+        data = f(data)
+
+    yield from data
+
+
+def read_dependencies(json_string: str) -> Iterable[Dependency]:
+    """Reads out flattened dependencies per key from graph json-tree"""
+    dependencies = dict()
+    for d in sorted(json.loads(json_string), key=lambda x: x["package"]["key"]):
+        p = d["package"]
+        dependencies[p["key"].lower()] = dict(
+            key=p["key"].lower(),
+            package_name=p["package_name"].lower(),
+            installed_version=p["installed_version"],
+            dependencies=list(map(lambda x: x["key"], d["dependencies"])),
+        )
+
+        _fill_in_stub_dependencies(d, dependencies)
+
+    for d in sorted(dependencies.keys()):
+        d = dependencies[d]
+        yield Dependency(
+            d["key"].lower(),
+            d["package_name"].lower(),
+            d["installed_version"],
+            dependencies=list(
+                sorted(
+                    _dedupe_dependencies(
+                        chain.from_iterable(
+                            map(lambda x: _resolve_dependencies(x, dependencies), d["dependencies"])
+                        )
+                    ),
+                    key=lambda x: x.key,
+                )
+            ),
+        )
+
+
+def _fill_in_stub_dependencies(d, dependencies):
+    """This is a special case because I've noticed that at least setuptools was missing"""
+    for dd in d["dependencies"]:
+        if dd["key"].lower() in dependencies:
+            continue
+
+        dependencies[dd["key"].lower()] = dict(
+            key=dd["key"],
+            package_name=dd["package_name"],
+            installed_version=dd["installed_version"],
+            dependencies=[],
+        )
+
+
+def _resolve_dependencies(dependency: str, dependencies: Dict[str, Dict[str, Any]]) -> Iterable[Dependency]:
+    d = dependencies[dependency.lower()]
+    yield Dependency(d["key"].lower(), d["package_name"].lower(), d["installed_version"])
+    for dd in d["dependencies"]:
+        yield from _resolve_dependencies(dd, dependencies)
+
+
+def _dedupe_dependencies(dependencies: Iterable[Dependency]) -> Iterable[Dependency]:
+    keys_seen = set()
+    for d in dependencies:
+        if d.key not in keys_seen:
+            yield d
+            keys_seen.add(d.key)
+
+
+def _instantiate_and_flatten_dependencies(deps: List[Dict[str, Any]]) -> Iterable[Dependency]:
+    for d in deps:
+        yield Dependency(d["key"], d["package_name"], d["installed_version"])
+        if d.get("dependencies"):
+            yield from _instantiate_and_flatten_dependencies(d["dependencies"])
+
+
+def read_direct_dependencies(pipfile_string: str) -> List[str]:
+    config = toml.loads(pipfile_string)
+    dependencies = []
+    for section in ("dev-packages", "packages"):
+        dependencies.extend(map(lambda s: s.lower(), config.get(section, {}).keys()))
+
+    return list(sorted(set(dependencies)))
+
+
+def create_build_file(
+    all_dependencies: Iterable[Dependency], limit_to: Optional[Iterable[str]] = None
+) -> str:
+    if limit_to is None:
+        limit_to = set()
+
+    build = []
+    for dependency in all_dependencies:
+        if limit_to and dependency.key not in limit_to:
+            continue
+
+        build.append(
+            textwrap.dedent(
+                """
+                python_requirement_library(
+                    name="{package_name}",
+                    requirements=[
+                        {dependencies}
+                    ],
+                )
+                """.format(
+                    package_name=dependency.package_name,
+                    version=dependency.installed_version,
+                    dependencies=_build_requirements_string(dependency, indent_level=6),
+                )
+            )
+        )
+
+    return "\n".join(build)
+
+
+def _build_requirements_string(dependency: Dependency, indent_level=0) -> str:
+    indent = " " * (4 * indent_level)
+    return f"\n{indent}".join(
+        'python_requirement("{}=={}"),'.format(d.package_name, d.installed_version) for d in dependency
+    )
+
+
+def main(pipfile: Path, pipfile_graph: Path, build_file: Path) -> None:
+    all_dependencies = read_dependencies(pipfile_graph.read_text())
+    direct_dependencies = read_direct_dependencies(pipfile.read_text())
+
+    build_file.write_text(
+        "# Generated by tools/pipenv_graph_to_build.py. See README for how to regenerate.\n"
+        + create_build_file(all_dependencies, direct_dependencies).lstrip()
+    )
+
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("--pipfile", default="Pipfile")
+    parser.add_argument("--pipfile-graph", default="Pipfile.lock.graph")
+    parser.add_argument("--build-file", default="BUILD")
+
+    args = parser.parse_args()
+
+    main(Path(args.pipfile), Path(args.pipfile_graph), Path(args.build_file))
